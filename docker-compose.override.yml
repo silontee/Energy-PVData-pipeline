@@ -1,0 +1,4 @@
+services:
+  pv-worker:
+    environment:
+      PREFECT_API_URL: http://host.docker.internal:4200/api

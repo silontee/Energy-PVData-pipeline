@@ -1,12 +1,39 @@
 version: '3.8'
 
 services:
+  prefect-db:
+    image: postgres:15
+    container_name: prefect-db
+    restart: always
+    environment:
+      - POSTGRES_USER=${PREFECT_DB_USER}
+      - POSTGRES_PASSWORD=${PREFECT_DB_PASS}
+      - POSTGRES_DB=${PREFECT_DB_NAME}
+    volumes:
+      - prefect_data:/var/lib/postgresql/data
+    networks:
+      - pv-net
+
+  prefect-server:
+    build: .
+    container_name: prefect-server
+    restart: always
+    command: ["uv", "run", "prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
+    environment:
+      - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${PREFECT_DB_USER}:${PREFECT_DB_PASS}@prefect-db:5432/${PREFECT_DB_NAME}
+      - PREFECT_UI_API_URL=http://127.0.0.1:4200/api
+    ports:
+      - "4200:4200"
+    depends_on:
+      - prefect-db
+    networks:
+      - pv-net
+
   pv-db:
     image: postgres:15
     container_name: pv-db
     restart: always
     environment:
-      # .env 파일에 정의된 변수를 사용하도록 수정
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_PASSWORD=${DB_PASS}
       - POSTGRES_DB=${DB_NAME}
@@ -22,9 +49,19 @@ services:
     container_name: pv-grafana
     ports:
       - "3002:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # [수정] 프로비저닝 경로를 역할별로 정확히 나눕니다.
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASS}
+      # [추가] datasource.yml에서 ${DB_NAME} 등을 읽을 수 있게 변수를 넘겨줍니다.
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - DB_NAME=${DB_NAME}
     depends_on:
       - pv-db
     networks:
@@ -36,19 +73,20 @@ services:
     restart: always
     env_file: .env
     environment:
-      # 비밀번호가 포함된 URL도 변수 처리
-      - DB_URL=postgresql+psycopg2://${DB_USER}:${DB_PASS}@pv-db:5432/${DB_NAME}
-      - PREFECT_API_URL=${PREFECT_API_URL}
+      DB_URL: postgresql+psycopg2://${DB_USER}:${DB_PASS}@pv-db:5432/${DB_NAME}
+      PREFECT_API_URL: http://prefect-server:4200/api
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - pv-db
+      - prefect-server
     networks:
       - pv-net
 
 volumes:
   postgres_data:
   grafana_data:
+  prefect_data:
 
 networks:
   pv-net:

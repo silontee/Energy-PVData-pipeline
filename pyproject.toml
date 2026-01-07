@@ -1,7 +1,7 @@
 [project]
-name = "weather-pipeline"
-version = "0.2.0"
-description = "Weather and Power Demand ETL Pipeline"
+name = "Energy-PVData-pipeline"  # 프로젝트 이름 수정
+version = "1.0.0"               # 정식 버전으로 변경
+description = "Solar Power Generation Data Pipeline (Nambu API)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

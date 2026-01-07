@@ -1,300 +1,161 @@
-# DW(Demand - weather Data) Pipeline
+﻿# ☀️ Energy-Data-Pipeline (태양광 발전 데이터 파이프라인)
 
-기상청 ASOS 데이터와 한국전력거래소(KPX) 전력수요 데이터를 수집, 처리, 통합하는 ETL 파이프라인입니다. Prefect를 사용하여 워크플로우를 관리하고, PostgreSQL 데이터베이스에 데이터를 저장합니다.
-전력수급 데이터는 다음 링크를 통해 확인이 가능함 : https://openapi.kpx.or.kr/openapi.do#
-## 주요 기능
+> 공공데이터포털 API를 활용하여 태양광 발전 실적을 수집하고, **Prefect**로 스케줄링/실행 관리, **Grafana**로 시각화하는 데이터 파이프라인입니다.
+> 본 프로젝트는 태양광 발전 데이터 증강(Data Augmentation) 연구를 위한 기초 데이터 확보를 목적으로 합니다.
 
-- 🌤️ **기상 데이터 수집**: 기상청 ASOS 시간별 데이터 (42개 관측소)
-- ⚡ **전력수요 데이터 수집**: KPX 5분 단위 전력수급 데이터
-- 🔄 **데이터 통합**: 1시간 단위 기상+전력수요 통합 데이터 생성
-- 📊 **결측치 처리**: 스플라인 보간 및 역사적 평균값 기반 보정
-- 🗄️ **데이터베이스 저장**: PostgreSQL에 구조화된 데이터 저장
-- 📅 **자동화**: Prefect 기반 스케줄링 및 워크플로우 관리
-- 🔔 **알림**: Slack 웹훅을 통한 실행 결과 알림
+---
 
-## 프로젝트 구조
+## 🏗️ 아키텍처
+컨테이너 기준 전체 구성은 아래와 같습니다.
 
 ```
-weather-pipeline/
-├── fetch_data/              # 데이터 수집 및 처리 모듈
-│   ├── collect_asos.py      # 기상청 ASOS 데이터 수집
-│   ├── collect_demand.py    # KPX 전력수요 데이터 수집
-│   ├── aggregate_hourly.py  # 1시간 단위 데이터 통합
-│   ├── concat_demand.py     # CSV 파일 병합 (레거시)
-│   ├── impute_missing.py    # 결측치 처리
-│   ├── database.py          # DB 모델 및 연결
-│   └── transfer_demand_1h.py # 데이터 전송 유틸
-├── prefect_flows/            # Prefect 워크플로우
-│   ├── prefect_pipeline.py  # 메인 ETL 플로우
-│   ├── merge_to_all.py      # CSV 통합 유틸
-│   └── deploy.py            # Prefect 배포 스크립트
-├── notify/                  # 알림 모듈
-│   └── slack_notifier.py    # Slack 알림
-├── docker/                  # Docker 설정
-│   ├── docker-compose.yml   # Prefect 서버/워커 설정
-│   └── Dockerfile           # 컨테이너 이미지
-├── data/                    # CSV 데이터 저장소
-│   └── asos_*.csv           # 일별 기상 데이터
-├── main.py                  # 진입점
-├── pyproject.toml           # 프로젝트 의존성
-└── README.md                # 프로젝트 개요
+            (공공데이터포털 API)
+                    │
+                    ▼
+            pv-worker (Prefect Worker)
+                    │  (SQLAlchemy)
+                    ▼
+          pv-db (PostgreSQL: solar_db)
+                    ▲
+                    │  (Datasource)
+                    ▼
+             pv-grafana (Dashboards)
+
+prefect-server (Prefect UI/API) ── uses ── prefect-db (PostgreSQL)
+         ▲
+         │ (work pool: default-agent-pool)
+         └──────────── pv-worker
 ```
 
-## 빠른 시작
+### 🔄 데이터 흐름(요약)
+1) `pv-worker`가 API에서 발전 실적 수집
+2) 수집 데이터를 `pv-db`의 테이블(`pv_generation`, `plant_info`)에 적재
+3) Grafana가 `pv-db`를 조회하여 대시보드로 시각화
+4) Prefect는 `prefect-server`에서 스케줄/실행 이력을 관리하며, 내부 DB로 `prefect-db(PostgreSQL)`를 사용합니다.
 
-### 1. 환경 설정
+---
 
-프로젝트 루트에 `.env` 파일을 생성하고 다음 환경 변수를 설정하세요:
+## ⚙️ 사전 준비
+- Docker Desktop
+- (선택) 로컬에서 Prefect CLI를 실행할 경우 Python + `uv`
 
-```bash
-# 필수
-SERVICE_KEY=your_weather_api_key
-DEMAND_DATABASE_URL=postgresql+asyncpg://user:password@host:5432/database
+---
 
-# 선택
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
-PREFECT_API_URL=http://prefect-server-new:4200/api
-PREFECT_DOCKER_NETWORK=weather-pipeline_prefect-new
+## 🔐 환경 변수(.env) 설정
+`.env.example`을 복사해 `.env`를 만들고 값을 채워주세요.
+
+```powershell
+copy .env.example .env
 ```
 
-### 2. 의존성 설치
+필수 키:
+- `NAMBU_API_KEY`: 공공데이터포털 서비스 키
+- `DB_USER`, `DB_PASS`, `DB_NAME`: PV 데이터베이스(pv-db) 계정 정보
+- `PREFECT_DB_USER`, `PREFECT_DB_PASS`, `PREFECT_DB_NAME`: Prefect 내부 DB(prefect-db) 계정 정보
+- `GRAFANA_USER`, `GRAFANA_PASS`: Grafana 계정 정보
 
-```bash
-# uv 사용 (권장)
-uv sync
+로컬에서 Prefect CLI 실행 시(터미널 세션에만 적용):
+- `PREFECT_API_URL=http://127.0.0.1:4200/api`
 
-# 또는 pip 사용
-pip install -e .
-```
+---
 
-### 3. 데이터베이스 설정
+## 🌐 서비스 접속 정보
 
-PostgreSQL 데이터베이스를 준비하고 `DEMAND_DATABASE_URL`을 설정하세요. 테이블은 자동으로 생성됩니다.
+| 서비스 | 주소 | 비고 |
+|---|---|---|
+| Prefect UI | http://127.0.0.1:4200 | 배포/실행 이력, 스케줄 확인 |
+| Grafana | http://127.0.0.1:3002 | 대시보드 확인 (초기 ID/PW: `admin/admin`) |
+| PV DB(Postgres) | 127.0.0.1:5432 | 로컬 DB 툴로 접근 시 |
 
-### 4. Docker Compose로 실행
+---
 
-```bash
-cd docker
-# 이미지 빌드 및 서버/워커/배포 컨테이너 기동
+## 🚀 실행 순서 (처음부터)
+
+### 1) Docker 컨테이너 기동
+```powershell
 docker compose up -d --build
-
-# Prefect 서버가 healthy 되면 배포 스크립트 실행
-docker compose run --rm weather-deployer
 ```
 
-### 5. Prefect UI 접속
+### 2) Prefect 배포 등록 (처음 1회 또는 스케줄/엔트리포인트 변경 시)
+> 아래 두 줄은 “현재 터미널”에서만 Prefect 서버 주소를 지정한 뒤, 배포를 등록하는 과정입니다.
 
-브라우저에서 `http://localhost:4300`에 접속하여 Prefect UI를 확인하고 플로우를 실행할 수 있습니다.
-
-## 사용 방법
-
-### 개별 스크립트 실행
-
-#### 기상 데이터 수집
-```bash
-python fetch_data/collect_asos.py
-# 입력 예: 20250101,20250131
+```powershell
+$env:PREFECT_API_URL="http://127.0.0.1:4200/api"
+uv run prefect deploy
 ```
 
-#### 전력수요 데이터 수집
-```bash
-python fetch_data/collect_demand.py
-# 선택:
-# 1. 날짜 범위 지정 수집 (DB 저장)
-#    - 입력: start,end = 'YYYYMMDD,YYYYMMDD'
-# 2. 백필 모드 (DB 마지막 이후 수집)
-#    - 자동으로 DB의 마지막 timestamp 이후 데이터만 수집
-# 3. 최근 2시간 수집 (1시간 스케줄용)
-#    - 최근 2시간 데이터를 수집하여 DB에 저장
-# 4. CSV 파일로 다운로드 (기존 방식)
-#    - 입력: start,end = 'YYYYMMDD,YYYYMMDD'
+### 3) 수동 실행 테스트 (선택)
+```powershell
+$env:PREFECT_API_URL="http://127.0.0.1:4200/api"
+uv run prefect deployment run "Daily Solar Automation/Daily-Solar-Sync"
 ```
 
-#### 1시간 데이터 통합
-```bash
-python fetch_data/aggregate_hourly.py
-# 선택:
-# 1. 날짜 범위 지정 통합
-#    - 입력: 시작일시 (YYYY-MM-DD HH), 종료일시 (YYYY-MM-DD HH)
-#    - 5분 데이터를 1시간 평균으로 집계하고 기상 데이터와 통합
-# 2. 백필 모드
-#    - 자동으로 DB의 마지막 timestamp 이후 데이터만 통합
-# 3. 최근 24시간 통합
-#    - 최근 24시간 데이터를 통합하여 DB에 저장
+### 4) 로그 확인
+```powershell
+docker compose logs -f pv-worker
+docker compose logs -f prefect-server
 ```
 
-### Prefect 플로우 실행
+---
 
-#### CLI로 실행
-```bash
-# 일일 기상 데이터 수집
-prefect deployment run 'daily-weather-collection-flow' -p target_date=20250101
+## 🛠️ 초기 데이터 적재 (필요 시)
+과거 데이터/마스터 데이터를 처음 구성해야 할 때만 실행합니다.
 
-# 시간별 전력수요 수집
-prefect deployment run 'hourly-demand-collection-flow'
+### ⚠️ (중요) 공공데이터포털 파일 다운로드
+초기 적재 단계에서 “설비 사양/발전소 정보” CSV가 필요할 수 있습니다.
+아래 링크에서 본인 계정으로 로그인 후 제공 파일을 다운로드해 프로젝트 루트에 저장하세요.
 
-# 백필 플로우
-prefect deployment run 'backfill-flow'
+- 다운로드 링크: https://www.data.go.kr/iim/dps/dpc/selectMyDataPrcusView.do
+- 저장 위치: 프로젝트 루트(예: `C:\pv_progect\Energy-PVData-pipeline\`)
+- 파일명이 다르면: `scripts/initial_db_ingestion.py`의 `SPECS_FILE` 경로를 다운로드한 파일명으로 수정
 
-# 전체 ETL 플로우
-prefect deployment run 'full-etl-flow' -p target_date=20250101
+### 적재 단계
+1) 시작일 탐색
+```powershell
+uv run python scripts/nambu_probe_date.py
 ```
 
-#### Prefect UI에서 실행
-1. `http://localhost:4300` 접속
-2. Deployments 메뉴에서 원하는 플로우 선택
-3. "Run" 버튼 클릭하여 실행
-
-### 워크풀 리셋
-
-워크풀을 리셋해야 할 경우:
-
-```bash
-docker compose run --rm weather-deployer prefect work-pool delete weather-new-pool || true
-docker compose run --rm weather-deployer
+2) 과거 데이터 수집
+```powershell
+uv run python scripts/nambu_bulk_sync.py
 ```
 
-## 데이터베이스 스키마
+3) 데이터 정리/병합
+```powershell
+uv run python scripts/nambu_merge_pv_data.py
+```
 
-### `demand_5min` 테이블
-5분 단위 전력수급 원본 데이터
+4) DB 적재
+```powershell
+uv run python scripts/initial_db_ingestion.py
+```
 
-| 컬럼 | 타입 | 설명 |
-|------|------|------|
-| `id` | Integer | 자동 증가 PK |
-| `timestamp` | DateTime | 기준일시 (unique index) |
-| `current_demand` | Float | 현재수요(MW) |
-| `current_supply` | Float | 현재공급(MW) |
-| `supply_capacity` | Float | 공급가능용량(MW) |
-| `supply_reserve` | Float | 공급예비력(MW) |
-| `reserve_rate` | Float | 공급예비율(%) |
-| `operation_reserve` | Float | 운영예비력(MW) |
-| `is_holiday` | Boolean | 공휴일 여부 |
-| `created_at` | DateTime | 생성일시 |
+5) 적재 확인
+```powershell
+uv run python scripts/inspect_both_table.py
+```
 
-**인덱스**: `ix_demand_5min_timestamp_unique` (timestamp, unique)
+---
 
-### `demand_weather_1h` 테이블
-1시간 단위 기상+전력수요 통합 데이터
+## 📊 Grafana에서 확인할 수 있는 것들
+Grafana는 `pv-db`를 datasource로 사용합니다(프로비저닝: `grafana/provisioning/datasources/datasource.yml`).
 
-| 컬럼 | 타입 | 설명 |
-|------|------|------|
-| `id` | Integer | 자동 증가 PK |
-| `timestamp` | DateTime | 기준일시 (복합 unique index) |
-| `station_name` | String(50) | 관측소명 (복합 unique index) |
-| `temperature` | Float | 기온(°C) |
-| `humidity` | Float | 습도(%) |
-| `demand_avg` | Float | 1시간 평균 수요(MW) |
-| `is_holiday` | Boolean | 공휴일 여부 |
-| `created_at` | DateTime | 생성일시 |
+추천 대시보드/패널 아이디어:
+- 발전량 시계열(시간대별): 발전소(`ipptnm`), 호기(`hogi`)별 `generation` 추이
+- 일/주/월 집계: 날짜별 합계/평균/최대 발전량
+- 발전소 비교: 여러 발전소를 한 그래프에서 비교(Top N)
+- 결측/이상치 탐지: 특정 날짜/시간대에 발전량이 0으로 고정되는 구간 찾기
+- 최신 수집 상태: “최근 n일간 데이터가 들어왔는지” 확인(마지막 `timestamp` 기준)
 
-**인덱스**: `ix_demand_weather_1h_timestamp_station` (timestamp, station_name, unique)
+---
 
-## 생성되는 파일
+## ⏰ Prefect 자동 실행(스케줄)
+- 스케줄은 `prefect.yaml`에 정의되어 있으며 “매일 09:00(Asia/Seoul)” 실행을 목표로 합니다.
+- `uv run prefect deploy`는 **최초 1회** 또는 **스케줄/엔트리포인트 변경 시** 다시 실행하면 됩니다.
 
-### CSV 파일
-- **일별 기상 데이터**: `data/asos_YYYYMMDD_YYYYMMDD.csv`
-  - 기상청 ASOS 시간별 데이터 (42개 관측소)
-  - 컬럼: date, temperature, humidity, station_name
-- **통합 기상 데이터**: `data/asos_all_merged.csv`
-  - 모든 일별 파일을 병합한 누적 데이터
-- **전력수요 데이터**: `Demand_Data_YYYYMMDD_YYYYMMDD.csv` (레거시)
-  - KPX 5분 단위 전력수급 데이터 (CSV 형식)
-  - `Demand_Data_all.csv`: 모든 기간을 병합한 파일
+---
 
-### 데이터베이스
-- **PostgreSQL**에 구조화된 데이터 저장
-- **자동 upsert 처리**: 중복 데이터 방지
-  - `demand_5min`: timestamp 기준 upsert
-  - `demand_weather_1h`: timestamp + station_name 기준 upsert
-- **자동 테이블 생성**: `init_db()` 호출 시 테이블 자동 생성
-
-## 주요 워크플로우
-
-### 1. 일일 기상 데이터 수집 플로우
-- **실행 주기**: 매일 오전 9시 (전날 데이터)
-- **작업 순서**:
-  1. 기상 데이터 수집 (42개 관측소)
-  2. 결측치 처리 (스플라인 보간 / 역사적 평균)
-  3. 일별 CSV 저장
-  4. 통합 파일 병합
-  5. Slack 알림
-
-### 2. 시간별 전력수요 수집 플로우
-- **실행 주기**: 매 시간
-- **작업 순서**:
-  1. DB 초기화
-  2. 최근 2시간 전력수요 수집
-  3. 최근 24시간 1시간 통합 데이터 생성
-
-### 3. 백필 플로우
-- **실행**: 수동 또는 주기적
-- **작업 순서**:
-  1. 전력수요 백필 (DB 마지막 이후 데이터)
-  2. 1시간 통합 데이터 백필
-
-### 4. 전체 ETL 플로우
-- **실행**: 수동
-- **작업 순서**:
-  1. 기상 데이터 수집 및 처리
-  2. 전력수요 수집
-  3. 1시간 통합 데이터 생성
-
-## 결측치 처리 전략
-
-기상 데이터의 결측치는 다음 전략으로 처리됩니다:
-
-1. **연속 3개 이하**: 스플라인 보간 (cubic interpolation)
-2. **연속 4개 이상**: 역사적 평균값 (같은 지역, 같은 월-일-시)
-
-## 의존성
-
-주요 라이브러리:
-- **Prefect 3.x**: 워크플로우 오케스트레이션
-- **SQLAlchemy 2.x**: ORM (async)
-- **asyncpg**: PostgreSQL 비동기 드라이버
-- **aiohttp**: 비동기 HTTP 클라이언트
-- **pandas**: 데이터 처리
-- **scipy**: 스플라인 보간
-- **workalendar**: 공휴일 계산
-
-전체 의존성은 `pyproject.toml`을 참고하세요.
-
-## 환경 변수
-
-| 변수명 | 설명 | 필수 | 기본값 |
-|--------|------|------|--------|
-| `SERVICE_KEY` | 기상청 API 키 | ✅ | - |
-| `DEMAND_DATABASE_URL` | PostgreSQL 연결 URL | ✅ | `postgresql+asyncpg://demand:demand@demand-db:5432/demand` |
-| `SLACK_WEBHOOK_URL` | Slack 알림 웹훅 | ❌ | - |
-| `PREFECT_API_URL` | Prefect 서버 URL | ❌ | `http://prefect-server-new:4200/api` |
-| `PREFECT_DOCKER_NETWORK` | Docker 네트워크명 | ❌ | `weather-pipeline_prefect-new` |
-
-## 트러블슈팅
-
-### API 호출 실패
-- API 키 유효성 확인
-- 네트워크 연결 확인
-- 재시도 로직 확인 (자동으로 최대 3-5회 재시도)
-
-### DB 연결 실패
-- `DEMAND_DATABASE_URL` 환경 변수 확인
-- PostgreSQL 서버 상태 확인
-- 네트워크 접근 권한 확인
-
-### Prefect 플로우 실행 실패
-- Prefect 서버 상태 확인: `docker compose ps`
-- 워커 로그 확인: `docker compose logs weather-worker`
-- 환경 변수 설정 확인
-
-## 추가 문서
-
-- [ARCHITECTURE.md](./ARCHITECTURE.md): 상세 아키텍처 및 모듈 문서
-
-## 라이선스
-
-이 프로젝트는 내부 사용을 위한 것입니다.
-
-## 기여
-
-이슈 및 개선 사항은 프로젝트 관리자에게 문의하세요.
+## 🧩 트러블슈팅
+- Prefect UI가 빈 화면/`ERR_EMPTY_RESPONSE`: 서버 초기화(의존성 설치) 중일 수 있으니 1~2분 대기 후 재접속
+- `database is locked`: Prefect 내부 DB가 SQLite를 쓸 때 발생할 수 있으며, 본 프로젝트는 `prefect-db(PostgreSQL)`를 사용하도록 구성되어 있습니다.
+- Work pool이 없다는 경고: `pv-worker` 컨테이너를 먼저 띄우면 `default-agent-pool`이 자동 생성됩니다.

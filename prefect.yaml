@@ -24,7 +24,7 @@ deployments:
   tags: []
   concurrency_limit: null
   description: null
-  entrypoint: ./fetch_data/pv/daily_pv_automation.py:solar_automation_flow
+  entrypoint: ./automation/daily_pv_automation.py:solar_automation_flow
   parameters: {}
   work_pool:
     name: default-agent-pool
@@ -32,5 +32,5 @@ deployments:
     job_variables: {}
   schedules:
   - cron: 0 9 * * *
-    timezone: null
+    timezone: Asia/Seoul
     day_or: true
